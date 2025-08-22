@@ -89,6 +89,7 @@ def create_user(name: str, role: str, zip_code: str):
     conn.close()
     return user_id
 
+
 def get_or_create_user(name: str, role: str, zip_code: str) -> int:
     """Return an existing user id for (name,role,zip) or create one."""
     conn = get_conn()
@@ -109,7 +110,6 @@ def get_or_create_user(name: str, role: str, zip_code: str) -> int:
         user_id = cur.lastrowid
     conn.close()
     return user_id
-
 
 
 def create_task(title: str, description: str, category: str, price: str, zip_code: str, posted_by: int):
@@ -200,17 +200,65 @@ def rank_tasks_by_match(tasks: List[tuple], helper_keywords: str):
     return with_scores
 
 
-
 # -------------------------
 # UI
 # -------------------------
 
 st.set_page_config(page_title="NearDoer", page_icon="🧰", layout="wide")
 
-init_db()
+# --- Global CSS + Header with Logo ---
+st.markdown("""
+<style>
+/* Page width + fonts */
+.block-container {max-width: 1000px !important;}
+h1, h2, h3, h4 {letter-spacing: 0.2px}
 
-st.title("🧰 NearDoer")
-st.caption("Post small tasks. Local helpers accept. Simple AI ranks best matches.")
+/* Top hero banner */
+.hero {
+  background: linear-gradient(90deg,#2563EB, #7C3AED);
+  color: white; padding: 16px 18px; border-radius: 16px;
+  margin: 8px 0 14px 0; box-shadow: 0 8px 28px rgba(37,99,235,0.25);
+  display:flex; align-items:center; gap:14px;
+}
+.hero .logo {
+  width: 40px; height: 40px; border-radius: 999px; background: #fff2;
+  display:flex; align-items:center; justify-content:center;
+  font-weight:800; font-size:16px; border: 2px solid rgba(255,255,255,0.35);
+}
+.hero .title {font-size: 22px; font-weight: 800; line-height: 1.2; letter-spacing:0.2px}
+.hero .subtitle {opacity: 0.95; font-size: 14px; margin-top: 4px}
+
+/* Re-usable card + badges */
+.card {
+  border: 1px solid #eaeef4; border-radius: 16px; padding: 14px 16px;
+  background: #fff; box-shadow: 0 6px 18px rgba(2,6,23,0.05); margin-bottom: 10px;
+}
+.card h4 {margin: 0 0 6px 0;}
+.badge {display:inline-block; padding:2px 10px; border-radius: 999px; font-size:12px; font-weight:600;}
+.badge.assembly{background:#EEF2FF;color:#4F46E5}
+.badge.cleaning{background:#ECFDF5;color:#047857}
+.badge.errands{background:#FFF7ED;color:#EA580C}
+.badge.yard{background:#ECFEFF;color:#0E7490}
+.badge.tech{background:#F0FDFA;color:#0F766E}
+.badge.other{background:#F1F5F9;color:#334155}
+.meta {font-size:12px; color:#475569}
+.price {font-size:12px; color:#334155}
+.zip {font-size:12px; color:#64748B}
+.small {font-size:12px; color:#64748B}
+.empty {padding:10px 12px; background:#F8FAFC; border:1px dashed #cfd8e3; border-radius:12px; color:#475569; font-size:13px}
+</style>
+
+<!-- Header with a simple "ND" logo -->
+<div class="hero">
+  <div class="logo">ND</div>
+  <div>
+    <div class="title">NearDoer — Get Small things done, Fast.</div>
+    <div class="subtitle">Post a task · AI ranks matches · Helpers Accept · Done.</div>
+  </div>
+</div>
+""", unsafe_allow_html=True)
+
+init_db()
 
 # Sidebar: user session
 st.sidebar.header("Your Profile")
@@ -227,12 +275,13 @@ if st.sidebar.button("Save / Switch Profile", use_container_width=True):
         st.sidebar.success(f"Profile ready as {role} (ID {user_id}).")
         fetch_tasks.clear()
 
-
 user = st.session_state.get("user")
 
 if not user:
     st.info("Create your profile in the left sidebar to begin.")
     st.stop()
+
+st.toast("Tip: Press R to refresh if a list looks stale.", icon="ℹ️")
 
 col1, col2 = st.columns([1, 1])
 
@@ -274,29 +323,49 @@ if user["role"] == "Poster":
 
         def render_task(t):
             tid, title, desc, category, price, zipv, status, posted_by, accepted_by, created_at, updated_at = t
-            with st.container(border=True):
-                st.markdown(f"**{title}**  ·  _{category}_  ·  ZIP {zipv}")
-                st.write(desc)
-                if price:
-                    st.caption(f"Price: {price}")
-                st.caption(f"Status: {status}")
-                if status == "Accepted" and accepted_by:
-                    st.caption(f"Accepted by Helper ID {accepted_by}")
-                if status == "Accepted":
-                    if st.button("Mark Completed", key=f"complete_{tid}"):
-                        complete_task(tid)
-                        fetch_tasks.clear()
-                        st.success("Marked completed.")
+            cat_map = {
+                "Assembly":"assembly","Cleaning":"cleaning","Errands":"errands",
+                "Yardwork":"yard","Tech Help":"tech","Other":"other"
+            }
+            cat_class = cat_map.get(category or "Other","other")
 
-        st.markdown("### Open")
+            st.markdown('<div class="card">', unsafe_allow_html=True)
+            st.markdown(f"<h4>🧰 {title}</h4>", unsafe_allow_html=True)
+            st.markdown(
+                f'<span class="badge {cat_class}">{category}</span> &nbsp; '
+                f'<span class="zip">ZIP {zipv}</span>',
+                unsafe_allow_html=True
+            )
+            st.write(desc)
+            meta = []
+            if price: meta.append(f'<span class="price">💵 {price}</span>')
+            meta.append(f'<span class="meta">📌 {status}</span>')
+            if status == "Accepted" and accepted_by:
+                meta.append(f'<span class="meta">🤝 Helper ID {accepted_by}</span>')
+            st.markdown(" &nbsp; ".join(meta), unsafe_allow_html=True)
+
+            if status == "Accepted":
+                if st.button("Mark Completed", key=f"complete_{tid}"):
+                    complete_task(tid)
+                    fetch_tasks.clear()
+                    st.success("Marked completed.")
+            st.markdown("</div>", unsafe_allow_html=True)
+
+        st.markdown("**Open**")
+        if not my_open:
+            st.markdown('<div class="empty">No open tasks yet. Post one on the left!</div>', unsafe_allow_html=True)
         for t in my_open:
             render_task(t)
 
-        st.markdown("### Accepted")
+        st.markdown("**Accepted**")
+        if not my_accepted:
+            st.markdown('<div class="empty">No accepted tasks yet.</div>', unsafe_allow_html=True)
         for t in my_accepted:
             render_task(t)
 
-        st.markdown("### Completed")
+        st.markdown("**Completed**")
+        if not my_completed:
+            st.markdown('<div class="empty">No completed tasks yet.</div>', unsafe_allow_html=True)
         for t in my_completed:
             render_task(t)
 
@@ -318,22 +387,37 @@ else:
             ranked = [(t, 0.0) for t in open_tasks]
 
         st.caption("Tasks ranked by AI Match (0.00–1.00)")
+        if not ranked:
+            st.markdown('<div class="empty">No open tasks for this ZIP/category yet.</div>', unsafe_allow_html=True)
+
         for (t, score) in ranked:
             tid, title, desc, category, price, zipv, status, posted_by, accepted_by, created_at, updated_at = t
-            with st.container(border=True):
-                st.markdown(f"**{title}**  ·  _{category}_  ·  ZIP {zipv}")
-                st.write(desc)
-                row = st.columns([1,1,1])
-                with row[0]:
-                    if price:
-                        st.caption(f"Price: {price}")
-                with row[1]:
-                    st.caption(f"AI Match: {score:.2f}")
-                with row[2]:
-                    if st.button("Accept Task", key=f"accept_{tid}"):
-                        accept_task(tid, user["id"])
-                        fetch_tasks.clear()
-                        st.success("Accepted! Check your Accepted list.")
+            cat_map = {
+                "Assembly":"assembly","Cleaning":"cleaning","Errands":"errands",
+                "Yardwork":"yard","Tech Help":"tech","Other":"other"
+            }
+            cat_class = cat_map.get(category or "Other","other")
+
+            st.markdown('<div class="card">', unsafe_allow_html=True)
+            st.markdown(f"<h4>🧰 {title}</h4>", unsafe_allow_html=True)
+            st.markdown(
+                f'<span class="badge {cat_class}">{category}</span> &nbsp; '
+                f'<span class="zip">ZIP {zipv}</span>',
+                unsafe_allow_html=True
+            )
+            st.write(desc)
+            row = st.columns([1,1,1])
+            with row[0]:
+                if price:
+                    st.markdown(f'<span class="price">💵 {price}</span>', unsafe_allow_html=True)
+            with row[1]:
+                st.markdown(f'<span class="small">🤖 AI Match: <b>{score:.2f}</b></span>', unsafe_allow_html=True)
+            with row[2]:
+                if st.button("Accept Task", key=f"accept_{tid}"):
+                    accept_task(tid, user["id"])
+                    fetch_tasks.clear()
+                    st.success("Accepted! Check your Accepted list.")
+            st.markdown("</div>", unsafe_allow_html=True)
 
     with col2:
         st.subheader("Your Accepted Tasks")
@@ -345,9 +429,24 @@ else:
         )
         rows = cur.fetchall()
         conn.close()
+
+        if not rows:
+            st.markdown('<div class="empty">You haven’t accepted any tasks yet.</div>', unsafe_allow_html=True)
+
         for r in rows:
             tid, title, desc, category, price, zipv, status = r
-            with st.container(border=True):
-                st.markdown(f"**{title}**  ·  _{category}_  ·  ZIP {zipv}")
-                st.write(desc)
-                st.caption(f"Status: {status}")
+            cat_map = {
+                "Assembly":"assembly","Cleaning":"cleaning","Errands":"errands",
+                "Yardwork":"yard","Tech Help":"tech","Other":"other"
+            }
+            cat_class = cat_map.get(category or "Other","other")
+            st.markdown('<div class="card">', unsafe_allow_html=True)
+            st.markdown(f"<h4>🧰 {title}</h4>", unsafe_allow_html=True)
+            st.markdown(
+                f'<span class="badge {cat_class}">{category}</span> &nbsp; '
+                f'<span class="zip">ZIP {zipv}</span>',
+                unsafe_allow_html=True
+            )
+            st.write(desc)
+            st.markdown(f'<span class="meta">📌 {status}</span>', unsafe_allow_html=True)
+            st.markdown("</div>", unsafe_allow_html=True)
