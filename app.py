@@ -7,6 +7,7 @@ from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
 
 DB_PATH = "data.db"
+APP_URL = "https://neardoer.streamlit.app"  # change if your URL is different
 
 # -------------------------
 # Database helpers
@@ -15,7 +16,6 @@ DB_PATH = "data.db"
 def get_conn():
     conn = sqlite3.connect(DB_PATH, check_same_thread=False)
     return conn
-
 
 def init_db():
     conn = get_conn()
@@ -52,9 +52,21 @@ def init_db():
         """
     )
 
+    # Testimonials
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS testimonials (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL,
+            role TEXT NOT NULL,
+            quote TEXT NOT NULL,
+            created_at TEXT
+        )
+        """
+    )
+
     conn.commit()
     conn.close()
-
 
 @st.cache_data(show_spinner=False)
 def fetch_tasks(status: str = None, zip_filter: str = None, category: str = None):
@@ -79,7 +91,6 @@ def fetch_tasks(status: str = None, zip_filter: str = None, category: str = None
     conn.close()
     return rows
 
-
 def create_user(name: str, role: str, zip_code: str):
     conn = get_conn()
     cur = conn.cursor()
@@ -89,28 +100,19 @@ def create_user(name: str, role: str, zip_code: str):
     conn.close()
     return user_id
 
-
 def get_or_create_user(name: str, role: str, zip_code: str) -> int:
-    """Return an existing user id for (name,role,zip) or create one."""
     conn = get_conn()
     cur = conn.cursor()
-    cur.execute(
-        "SELECT id FROM users WHERE name=? AND role=? AND zip=?",
-        (name.strip(), role.strip(), zip_code.strip())
-    )
+    cur.execute("SELECT id FROM users WHERE name=? AND role=? AND zip=?", (name.strip(), role.strip(), zip_code.strip()))
     row = cur.fetchone()
     if row:
         user_id = row[0]
     else:
-        cur.execute(
-            "INSERT INTO users (name, role, zip) VALUES (?, ?, ?)",
-            (name.strip(), role.strip(), zip_code.strip())
-        )
+        cur.execute("INSERT INTO users (name, role, zip) VALUES (?, ?, ?)", (name.strip(), role.strip(), zip_code.strip()))
         conn.commit()
         user_id = cur.lastrowid
     conn.close()
     return user_id
-
 
 def create_task(title: str, description: str, category: str, price: str, zip_code: str, posted_by: int):
     now = datetime.utcnow().isoformat()
@@ -128,7 +130,6 @@ def create_task(title: str, description: str, category: str, price: str, zip_cod
     conn.close()
     return task_id
 
-
 def accept_task(task_id: int, helper_id: int):
     now = datetime.utcnow().isoformat()
     conn = get_conn()
@@ -139,7 +140,6 @@ def accept_task(task_id: int, helper_id: int):
     )
     conn.commit()
     conn.close()
-
 
 def complete_task(task_id: int):
     now = datetime.utcnow().isoformat()
@@ -152,53 +152,65 @@ def complete_task(task_id: int):
     conn.commit()
     conn.close()
 
+# -------------------------
+# Testimonials + Stats
+# -------------------------
+
+def add_testimonial(name: str, role: str, quote: str):
+    now = datetime.utcnow().isoformat()
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("INSERT INTO testimonials (name, role, quote, created_at) VALUES (?, ?, ?, ?)", (name.strip(), role.strip(), quote.strip(), now))
+    conn.commit()
+    conn.close()
+
+@st.cache_data(show_spinner=False)
+def fetch_testimonials(limit: int = 6):
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("SELECT name, role, quote FROM testimonials ORDER BY id DESC LIMIT ?", (limit,))
+    rows = cur.fetchall()
+    conn.close()
+    return rows
+
+def get_stats():
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("SELECT COUNT(*) FROM users"); users = cur.fetchone()[0]
+    cur.execute("SELECT COUNT(*) FROM tasks"); posted = cur.fetchone()[0]
+    cur.execute("SELECT COUNT(*) FROM tasks WHERE status='Accepted'"); accepted = cur.fetchone()[0]
+    cur.execute("SELECT COUNT(*) FROM tasks WHERE status='Completed'"); completed = cur.fetchone()[0]
+    conn.close()
+    return users, posted, accepted, completed
 
 # -------------------------
-# AI-style matching (local)
+# AI-style matching
 # -------------------------
 
 def rank_tasks_by_match(tasks: List[tuple], helper_keywords: str):
-    """
-    Return list of (task_row, score_float) sorted by score desc.
-    More forgiving: uses unigrams+bigrams and a simple fallback if TF-IDF yields 0.0 everywhere.
-    """
-    if not tasks:
-        return []
-
-    # Build documents from task fields
+    if not tasks: return []
     docs = []
     for t in tasks:
         _, title, desc, category, _, _, _, _, _, _, _ = t
-        text = " ".join([
-            str(title or ""),
-            str(desc or ""),
-            str(category or "")
-        ])
-        docs.append(text)
+        docs.append(" ".join([str(title or ""), str(desc or ""), str(category or "")]))
 
     query = helper_keywords or ""
-    # TF-IDF with unigrams+bigrams, english stop words
     vectorizer = TfidfVectorizer(stop_words="english", ngram_range=(1, 2), lowercase=True)
     X = vectorizer.fit_transform([*docs, query])
-    task_vecs = X[:-1]
-    helper_vec = X[-1]
-    sims = cosine_similarity(task_vecs, helper_vec)
+    sims = cosine_similarity(X[:-1], X[-1])
     scores = [float(s[0]) for s in sims]
 
-    # Fallback: if all zero, do a simple keyword overlap score
     if all(s == 0.0 for s in scores) and query.strip():
-        q_terms = {w.strip().lower() for w in query.replace(",", " ").split() if len(w.strip()) > 1}
+        q_terms = {w.strip().lower() for w in query.split() if len(w.strip()) > 1}
         new_scores = []
         for text in docs:
-            t_terms = {w.strip().lower() for w in text.replace(",", " ").split() if len(w.strip()) > 1}
-            overlap = len(q_terms & t_terms)
-            new_scores.append(float(overlap))
+            t_terms = {w.strip().lower() for w in text.split() if len(w.strip()) > 1}
+            new_scores.append(float(len(q_terms & t_terms)))
         scores = new_scores
 
     with_scores = list(zip(tasks, scores))
     with_scores.sort(key=lambda x: x[1], reverse=True)
     return with_scores
-
 
 # -------------------------
 # UI
@@ -206,247 +218,115 @@ def rank_tasks_by_match(tasks: List[tuple], helper_keywords: str):
 
 st.set_page_config(page_title="NearDoer", page_icon="🧰", layout="wide")
 
-# --- Global CSS + Header with Logo ---
+# Header
 st.markdown("""
 <style>
-/* Page width + fonts */
 .block-container {max-width: 1000px !important;}
-h1, h2, h3, h4 {letter-spacing: 0.2px}
-
-/* Top hero banner */
 .hero {
   background: linear-gradient(90deg,#2563EB, #7C3AED);
-  color: white; padding: 16px 18px; border-radius: 16px;
-  margin: 8px 0 14px 0; box-shadow: 0 8px 28px rgba(37,99,235,0.25);
-  display:flex; align-items:center; gap:14px;
+  color: white; padding: 14px; border-radius: 12px;
+  margin: 6px 0 12px 0; display:flex; align-items:center; gap:12px;
 }
-.hero .logo {
-  width: 40px; height: 40px; border-radius: 999px; background: #fff2;
-  display:flex; align-items:center; justify-content:center;
-  font-weight:800; font-size:16px; border: 2px solid rgba(255,255,255,0.35);
-}
-.hero .title {font-size: 22px; font-weight: 800; line-height: 1.2; letter-spacing:0.2px}
-.hero .subtitle {opacity: 0.95; font-size: 14px; margin-top: 4px}
-
-/* Re-usable card + badges */
-.card {
-  border: 1px solid #eaeef4; border-radius: 16px; padding: 14px 16px;
-  background: #fff; box-shadow: 0 6px 18px rgba(2,6,23,0.05); margin-bottom: 10px;
-}
-.card h4 {margin: 0 0 6px 0;}
-.badge {display:inline-block; padding:2px 10px; border-radius: 999px; font-size:12px; font-weight:600;}
-.badge.assembly{background:#EEF2FF;color:#4F46E5}
-.badge.cleaning{background:#ECFDF5;color:#047857}
-.badge.errands{background:#FFF7ED;color:#EA580C}
-.badge.yard{background:#ECFEFF;color:#0E7490}
-.badge.tech{background:#F0FDFA;color:#0F766E}
-.badge.other{background:#F1F5F9;color:#334155}
-.meta {font-size:12px; color:#475569}
-.price {font-size:12px; color:#334155}
-.zip {font-size:12px; color:#64748B}
-.small {font-size:12px; color:#64748B}
-.empty {padding:10px 12px; background:#F8FAFC; border:1px dashed #cfd8e3; border-radius:12px; color:#475569; font-size:13px}
+.hero .logo {width:40px; height:40px; border-radius:50%; background:#fff2; display:flex; align-items:center; justify-content:center; font-weight:800;}
+.card {border:1px solid #eaeef4; border-radius:10px; padding:10px 12px; margin-bottom:8px; background:#fff;}
+.empty {padding:8px; background:#f8fafc; border:1px dashed #cfd8e3; border-radius:10px; color:#475569; font-size:13px}
 </style>
-
-<!-- Header with a simple "ND" logo -->
-<div class="hero">
-  <div class="logo">ND</div>
-  <div>
-    <div class="title">NearDoer — Get Small things done, Fast.</div>
-    <div class="subtitle">Post a task · AI ranks matches · Helpers Accept · Done.</div>
-  </div>
-</div>
+<div class="hero"><div class="logo">ND</div><div><b>NearDoer</b> — get small things done fast<br><span style="font-size:13px">Post · AI ranks · Accept · Done</span></div></div>
 """, unsafe_allow_html=True)
 
 init_db()
 
-# Sidebar: user session
-st.sidebar.header("Your Profile")
-name = st.sidebar.text_input("Name", placeholder="e.g., Alex")
-role = st.sidebar.selectbox("Role", ["Poster", "Helper"])
-zip_code = st.sidebar.text_input("ZIP code", placeholder="e.g., 60616")
+# Stats
+u,p,a,c = get_stats()
+st.markdown(f"""
+<div style="display:flex; gap:8px; margin-bottom:10px;">
+  <div class="card"><b>👤 Users</b><br>{u}</div>
+  <div class="card"><b>📝 Tasks</b><br>{p}</div>
+  <div class="card"><b>🤝 Accepted</b><br>{a}</div>
+  <div class="card"><b>✅ Completed</b><br>{c}</div>
+</div>
+""", unsafe_allow_html=True)
 
-if st.sidebar.button("Save / Switch Profile", use_container_width=True):
-    if not name or not zip_code:
-        st.sidebar.error("Please enter both Name and ZIP code.")
-    else:
-        user_id = get_or_create_user(name, role, zip_code)
-        st.session_state["user"] = {"id": user_id, "name": name, "role": role, "zip": zip_code}
-        st.sidebar.success(f"Profile ready as {role} (ID {user_id}).")
+st.link_button("🔗 Share NearDoer", f"https://wa.me/?text=Try%20NearDoer%20at%20{APP_URL}", use_container_width=True)
+st.link_button("🐦 Share on X", f"https://twitter.com/intent/tweet?text=Try%20NearDoer%20%F0%9F%A7%B0%20{APP_URL}", use_container_width=True)
+
+# Testimonials
+st.subheader("What people are saying")
+rows = fetch_testimonials()
+if not rows:
+    st.markdown('<div class="empty">No testimonials yet. Be the first!</div>', unsafe_allow_html=True)
+else:
+    for (nm, rl, qt) in rows:
+        st.markdown(f'<div class="card"><b>{nm}</b> · {rl}<br>{qt}</div>', unsafe_allow_html=True)
+
+with st.expander("Leave a testimonial"):
+    tn = st.text_input("Your name")
+    tr = st.selectbox("I used NearDoer as…", ["Poster","Helper"])
+    tq = st.text_area("Your experience")
+    if st.button("Submit testimonial"):
+        if tn and tq:
+            add_testimonial(tn,tr,tq); fetch_testimonials.clear(); st.success("Thanks! Your testimonial is live.")
+
+# Sidebar profile
+st.sidebar.header("Profile")
+name = st.sidebar.text_input("Name")
+role = st.sidebar.selectbox("Role", ["Poster","Helper"])
+zip_code = st.sidebar.text_input("ZIP code")
+
+if st.sidebar.button("Save / Switch Profile"):
+    if name and zip_code:
+        uid = get_or_create_user(name, role, zip_code)
+        st.session_state["user"] = {"id": uid, "name": name, "role": role, "zip": zip_code}
         fetch_tasks.clear()
+        st.sidebar.success("Profile saved.")
 
 user = st.session_state.get("user")
+if not user: st.stop()
 
-if not user:
-    st.info("Create your profile in the left sidebar to begin.")
-    st.stop()
+col1,col2 = st.columns([1,1])
 
-st.toast("Tip: Press R to refresh if a list looks stale.", icon="ℹ️")
-
-col1, col2 = st.columns([1, 1])
-
-# -------------------------
-# Poster view
-# -------------------------
-if user["role"] == "Poster":
+# Poster
+if user["role"]=="Poster":
     with col1:
         st.subheader("Post a Task")
-        with st.form("post_task_form", clear_on_submit=True):
-            title = st.text_input("Title", placeholder="Assemble IKEA shelf")
-            desc = st.text_area("Description", placeholder="Need help assembling a KALLAX shelf. Bring a screwdriver.")
-            category = st.selectbox("Category", ["Cleaning", "Errands", "Assembly", "Yardwork", "Tech Help", "Other"])
-            price = st.text_input("Price (optional)", placeholder="$20 flat")
-            zip_in = st.text_input("ZIP", value=user["zip"])  # allow override
-            submitted = st.form_submit_button("Post Task")
-            if submitted:
-                if not title or not desc or not zip_in:
-                    st.warning("Title, description, and ZIP are required.")
-                else:
-                    tid = create_task(title.strip(), desc.strip(), category, price.strip(), zip_in.strip(), user["id"])
-                    st.success(f"Task posted (ID {tid}).")
-                    fetch_tasks.clear()  # invalidate cache
+        with st.form("post_task", clear_on_submit=True):
+            t = st.text_input("Title")
+            d = st.text_area("Description")
+            cat = st.selectbox("Category", ["Cleaning","Errands","Assembly","Yardwork","Tech Help","Other"])
+            pr = st.text_input("Price")
+            zp = st.text_input("ZIP", value=user["zip"])
+            if st.form_submit_button("Post Task") and t and d and zp:
+                create_task(t,d,cat,pr,zp,user["id"]); fetch_tasks.clear(); st.success("Task posted!")
 
     with col2:
         st.subheader("Your Tasks")
-        my_open = []
-        my_accepted = []
-        my_completed = []
         tasks = fetch_tasks()
-        for t in tasks:
-            if t[7] == user["id"]:  # posted_by
-                if t[6] == "Open":
-                    my_open.append(t)
-                elif t[6] == "Accepted":
-                    my_accepted.append(t)
-                else:
-                    my_completed.append(t)
+        for task in tasks:
+            tid,tit,desc,cat,pr,zp,stt,pid,aid,_,_ = task
+            if pid==user["id"]:
+                st.markdown(f"**{tit}** ({stt}) - {desc}")
+                if stt=="Accepted" and st.button("Mark Completed", key=f"c{tid}"):
+                    complete_task(tid); fetch_tasks.clear(); st.success("Completed!")
 
-        def render_task(t):
-            tid, title, desc, category, price, zipv, status, posted_by, accepted_by, created_at, updated_at = t
-            cat_map = {
-                "Assembly":"assembly","Cleaning":"cleaning","Errands":"errands",
-                "Yardwork":"yard","Tech Help":"tech","Other":"other"
-            }
-            cat_class = cat_map.get(category or "Other","other")
-
-            st.markdown('<div class="card">', unsafe_allow_html=True)
-            st.markdown(f"<h4>🧰 {title}</h4>", unsafe_allow_html=True)
-            st.markdown(
-                f'<span class="badge {cat_class}">{category}</span> &nbsp; '
-                f'<span class="zip">ZIP {zipv}</span>',
-                unsafe_allow_html=True
-            )
-            st.write(desc)
-            meta = []
-            if price: meta.append(f'<span class="price">💵 {price}</span>')
-            meta.append(f'<span class="meta">📌 {status}</span>')
-            if status == "Accepted" and accepted_by:
-                meta.append(f'<span class="meta">🤝 Helper ID {accepted_by}</span>')
-            st.markdown(" &nbsp; ".join(meta), unsafe_allow_html=True)
-
-            if status == "Accepted":
-                if st.button("Mark Completed", key=f"complete_{tid}"):
-                    complete_task(tid)
-                    fetch_tasks.clear()
-                    st.success("Marked completed.")
-            st.markdown("</div>", unsafe_allow_html=True)
-
-        st.markdown("**Open**")
-        if not my_open:
-            st.markdown('<div class="empty">No open tasks yet. Post one on the left!</div>', unsafe_allow_html=True)
-        for t in my_open:
-            render_task(t)
-
-        st.markdown("**Accepted**")
-        if not my_accepted:
-            st.markdown('<div class="empty">No accepted tasks yet.</div>', unsafe_allow_html=True)
-        for t in my_accepted:
-            render_task(t)
-
-        st.markdown("**Completed**")
-        if not my_completed:
-            st.markdown('<div class="empty">No completed tasks yet.</div>', unsafe_allow_html=True)
-        for t in my_completed:
-            render_task(t)
-
-# -------------------------
-# Helper view
-# -------------------------
+# Helper
 else:
     with col1:
-        st.subheader("Find Tasks Near You")
-        filt_zip = st.text_input("Filter by ZIP", value=user["zip"])  # keep simple: exact ZIP match
-        category = st.selectbox("Category", ["All", "Cleaning", "Errands", "Assembly", "Yardwork", "Tech Help", "Other"])
-        skills = st.text_input("Your skills / interests (comma-separated)", placeholder="cleaning, furniture assembly, laptop setup")
-
-        open_tasks = fetch_tasks(status="Open", zip_filter=filt_zip, category=category)
-
-        if skills.strip():
-            ranked = rank_tasks_by_match(open_tasks, skills)
-        else:
-            ranked = [(t, 0.0) for t in open_tasks]
-
-        st.caption("Tasks ranked by AI Match (0.00–1.00)")
-        if not ranked:
-            st.markdown('<div class="empty">No open tasks for this ZIP/category yet.</div>', unsafe_allow_html=True)
-
-        for (t, score) in ranked:
-            tid, title, desc, category, price, zipv, status, posted_by, accepted_by, created_at, updated_at = t
-            cat_map = {
-                "Assembly":"assembly","Cleaning":"cleaning","Errands":"errands",
-                "Yardwork":"yard","Tech Help":"tech","Other":"other"
-            }
-            cat_class = cat_map.get(category or "Other","other")
-
-            st.markdown('<div class="card">', unsafe_allow_html=True)
-            st.markdown(f"<h4>🧰 {title}</h4>", unsafe_allow_html=True)
-            st.markdown(
-                f'<span class="badge {cat_class}">{category}</span> &nbsp; '
-                f'<span class="zip">ZIP {zipv}</span>',
-                unsafe_allow_html=True
-            )
-            st.write(desc)
-            row = st.columns([1,1,1])
-            with row[0]:
-                if price:
-                    st.markdown(f'<span class="price">💵 {price}</span>', unsafe_allow_html=True)
-            with row[1]:
-                st.markdown(f'<span class="small">🤖 AI Match: <b>{score:.2f}</b></span>', unsafe_allow_html=True)
-            with row[2]:
-                if st.button("Accept Task", key=f"accept_{tid}"):
-                    accept_task(tid, user["id"])
-                    fetch_tasks.clear()
-                    st.success("Accepted! Check your Accepted list.")
-            st.markdown("</div>", unsafe_allow_html=True)
+        st.subheader("Find Tasks")
+        filt = st.text_input("Filter by ZIP", value=user["zip"])
+        cat = st.selectbox("Category", ["All","Cleaning","Errands","Assembly","Yardwork","Tech Help","Other"])
+        skills = st.text_input("Your skills")
+        open_tasks = fetch_tasks(status="Open", zip_filter=filt, category=cat)
+        ranked = rank_tasks_by_match(open_tasks, skills) if skills else [(t,0.0) for t in open_tasks]
+        for (task,sc) in ranked:
+            tid,tit,desc,cat,pr,zp,stt,pid,aid,_,_ = task
+            st.markdown(f"**{tit}** (AI Match {sc:.2f}) - {desc}")
+            if st.button("Accept Task", key=f"a{tid}"):
+                accept_task(tid,user["id"]); fetch_tasks.clear(); st.success("Accepted!")
 
     with col2:
         st.subheader("Your Accepted Tasks")
-        conn = get_conn()
-        cur = conn.cursor()
-        cur.execute(
-            "SELECT id, title, description, category, price, zip, status FROM tasks WHERE accepted_by=? ORDER BY id DESC",
-            (user["id"],),
-        )
-        rows = cur.fetchall()
-        conn.close()
-
-        if not rows:
-            st.markdown('<div class="empty">You haven’t accepted any tasks yet.</div>', unsafe_allow_html=True)
-
-        for r in rows:
-            tid, title, desc, category, price, zipv, status = r
-            cat_map = {
-                "Assembly":"assembly","Cleaning":"cleaning","Errands":"errands",
-                "Yardwork":"yard","Tech Help":"tech","Other":"other"
-            }
-            cat_class = cat_map.get(category or "Other","other")
-            st.markdown('<div class="card">', unsafe_allow_html=True)
-            st.markdown(f"<h4>🧰 {title}</h4>", unsafe_allow_html=True)
-            st.markdown(
-                f'<span class="badge {cat_class}">{category}</span> &nbsp; '
-                f'<span class="zip">ZIP {zipv}</span>',
-                unsafe_allow_html=True
-            )
-            st.write(desc)
-            st.markdown(f'<span class="meta">📌 {status}</span>', unsafe_allow_html=True)
-            st.markdown("</div>", unsafe_allow_html=True)
+        conn=get_conn(); cur=conn.cursor()
+        cur.execute("SELECT title,description,status FROM tasks WHERE accepted_by=?",(user["id"],))
+        rows=cur.fetchall(); conn.close()
+        for (tit,desc,stt) in rows:
+            st.markdown(f"**{tit}** ({stt}) - {desc}")
