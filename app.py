@@ -52,7 +52,7 @@ def init_db():
         """
     )
 
-    # Testimonials
+    # Testimonials table
     cur.execute(
         """
         CREATE TABLE IF NOT EXISTS testimonials (
@@ -160,12 +160,15 @@ def add_testimonial(name: str, role: str, quote: str):
     now = datetime.utcnow().isoformat()
     conn = get_conn()
     cur = conn.cursor()
-    cur.execute("INSERT INTO testimonials (name, role, quote, created_at) VALUES (?, ?, ?, ?)", (name.strip(), role.strip(), quote.strip(), now))
+    cur.execute(
+        "INSERT INTO testimonials (name, role, quote, created_at) VALUES (?, ?, ?, ?)",
+        (name.strip(), role.strip(), quote.strip(), now)
+    )
     conn.commit()
     conn.close()
 
-@st.cache_data(show_spinner=False)
 def fetch_testimonials(limit: int = 6):
+    # No cache: always read latest
     conn = get_conn()
     cur = conn.cursor()
     cur.execute("SELECT name, role, quote FROM testimonials ORDER BY id DESC LIMIT ?", (limit,))
@@ -188,7 +191,8 @@ def get_stats():
 # -------------------------
 
 def rank_tasks_by_match(tasks: List[tuple], helper_keywords: str):
-    if not tasks: return []
+    if not tasks:
+        return []
     docs = []
     for t in tasks:
         _, title, desc, category, _, _, _, _, _, _, _ = t
@@ -231,13 +235,13 @@ st.markdown("""
 .card {border:1px solid #eaeef4; border-radius:10px; padding:10px 12px; margin-bottom:8px; background:#fff;}
 .empty {padding:8px; background:#f8fafc; border:1px dashed #cfd8e3; border-radius:10px; color:#475569; font-size:13px}
 </style>
-<div class="hero"><div class="logo">ND</div><div><b>NearDoer</b> — get small things done fast<br><span style="font-size:13px">Post · AI ranks · Accept · Done</span></div></div>
+<div class="hero"><div class="logo">ND</div><div><b>NearDoer</b> — Get Small things done fast.<br><span style="font-size:13px">Post · AI ranks · Accept · Done.</span></div></div>
 """, unsafe_allow_html=True)
 
 init_db()
 
 # Stats
-u,p,a,c = get_stats()
+u, p, a, c = get_stats()
 st.markdown(f"""
 <div style="display:flex; gap:8px; margin-bottom:10px;">
   <div class="card"><b>👤 Users</b><br>{u}</div>
@@ -265,7 +269,9 @@ with st.expander("Leave a testimonial"):
     tq = st.text_area("Your experience")
     if st.button("Submit testimonial"):
         if tn and tq:
-            add_testimonial(tn,tr,tq); fetch_testimonials.clear(); st.success("Thanks! Your testimonial is live.")
+            add_testimonial(tn, tr, tq)
+            st.success("Thanks! Your testimonial is live.")
+            st.rerun()  # show it immediately
 
 # Sidebar profile
 st.sidebar.header("Profile")
@@ -281,12 +287,13 @@ if st.sidebar.button("Save / Switch Profile"):
         st.sidebar.success("Profile saved.")
 
 user = st.session_state.get("user")
-if not user: st.stop()
+if not user:
+    st.stop()
 
-col1,col2 = st.columns([1,1])
+col1, col2 = st.columns([1, 1])
 
 # Poster
-if user["role"]=="Poster":
+if user["role"] == "Poster":
     with col1:
         st.subheader("Post a Task")
         with st.form("post_task", clear_on_submit=True):
@@ -296,17 +303,21 @@ if user["role"]=="Poster":
             pr = st.text_input("Price")
             zp = st.text_input("ZIP", value=user["zip"])
             if st.form_submit_button("Post Task") and t and d and zp:
-                create_task(t,d,cat,pr,zp,user["id"]); fetch_tasks.clear(); st.success("Task posted!")
+                create_task(t, d, cat, pr, zp, user["id"])
+                fetch_tasks.clear()
+                st.success("Task posted!")
 
     with col2:
         st.subheader("Your Tasks")
         tasks = fetch_tasks()
         for task in tasks:
-            tid,tit,desc,cat,pr,zp,stt,pid,aid,_,_ = task
-            if pid==user["id"]:
+            tid, tit, desc, cat, pr, zp, stt, pid, aid, _, _ = task
+            if pid == user["id"]:
                 st.markdown(f"**{tit}** ({stt}) - {desc}")
-                if stt=="Accepted" and st.button("Mark Completed", key=f"c{tid}"):
-                    complete_task(tid); fetch_tasks.clear(); st.success("Completed!")
+                if stt == "Accepted" and st.button("Mark Completed", key=f"c{tid}"):
+                    complete_task(tid)
+                    fetch_tasks.clear()
+                    st.success("Completed!")
 
 # Helper
 else:
@@ -316,17 +327,21 @@ else:
         cat = st.selectbox("Category", ["All","Cleaning","Errands","Assembly","Yardwork","Tech Help","Other"])
         skills = st.text_input("Your skills")
         open_tasks = fetch_tasks(status="Open", zip_filter=filt, category=cat)
-        ranked = rank_tasks_by_match(open_tasks, skills) if skills else [(t,0.0) for t in open_tasks]
-        for (task,sc) in ranked:
-            tid,tit,desc,cat,pr,zp,stt,pid,aid,_,_ = task
+        ranked = rank_tasks_by_match(open_tasks, skills) if skills else [(t, 0.0) for t in open_tasks]
+        for (task, sc) in ranked:
+            tid, tit, desc, cat, pr, zp, stt, pid, aid, _, _ = task
             st.markdown(f"**{tit}** (AI Match {sc:.2f}) - {desc}")
             if st.button("Accept Task", key=f"a{tid}"):
-                accept_task(tid,user["id"]); fetch_tasks.clear(); st.success("Accepted!")
+                accept_task(tid, user["id"])
+                fetch_tasks.clear()
+                st.success("Accepted!")
 
     with col2:
         st.subheader("Your Accepted Tasks")
-        conn=get_conn(); cur=conn.cursor()
-        cur.execute("SELECT title,description,status FROM tasks WHERE accepted_by=?",(user["id"],))
-        rows=cur.fetchall(); conn.close()
-        for (tit,desc,stt) in rows:
+        conn = get_conn()
+        cur = conn.cursor()
+        cur.execute("SELECT title, description, status FROM tasks WHERE accepted_by=? ORDER BY id DESC", (user["id"],))
+        rows = cur.fetchall()
+        conn.close()
+        for (tit, desc, stt) in rows:
             st.markdown(f"**{tit}** ({stt}) - {desc}")
