@@ -1,7 +1,5 @@
 import streamlit as st
 import sqlite3
-import os
-import hashlib
 from datetime import datetime
 from typing import List
 from sklearn.feature_extraction.text import TfidfVectorizer
@@ -10,45 +8,15 @@ from sklearn.metrics.pairwise import cosine_similarity
 DB_PATH = "data.db"
 APP_URL = "https://neardoer.streamlit.app"
 
-# =========================
-# Password hashing helpers
-# =========================
-def _pbkdf2_hash(password: str, salt: bytes = None) -> str:
-    """
-    Returns 'salt_hex$hash_hex'. Uses PBKDF2-HMAC-SHA256, 100k iterations.
-    No external dependency required.
-    """
-    if salt is None:
-        salt = os.urandom(16)
-    pwd = password.encode("utf-8")
-    dk = hashlib.pbkdf2_hmac("sha256", pwd, salt, 100_000)
-    return salt.hex() + "$" + dk.hex()
-
-def _pbkdf2_verify(password: str, salted_hash: str) -> bool:
-    try:
-        salt_hex, hash_hex = salted_hash.split("$", 1)
-        salt = bytes.fromhex(salt_hex)
-        pwd_hash = _pbkdf2_hash(password, salt).split("$", 1)[1]
-        return hashlib.compare_digest(pwd_hash, hash_hex)
-    except Exception:
-        return False
-
-# =========================
-# DB helpers + migration
-# =========================
+# -------------------------
+# Database helpers
+# -------------------------
 def get_conn():
     return sqlite3.connect(DB_PATH, check_same_thread=False)
-
-def _column_exists(cur, table: str, col: str) -> bool:
-    cur.execute(f"PRAGMA table_info({table})")
-    cols = [r[1] for r in cur.fetchall()]
-    return col in cols
 
 def init_db():
     conn = get_conn()
     cur = conn.cursor()
-
-    # users
     cur.execute("""
         CREATE TABLE IF NOT EXISTS users (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -58,8 +26,6 @@ def init_db():
             skills TEXT
         )
     """)
-
-    # tasks
     cur.execute("""
         CREATE TABLE IF NOT EXISTS tasks (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -77,8 +43,6 @@ def init_db():
             FOREIGN KEY(accepted_by) REFERENCES users(id)
         )
     """)
-
-    # testimonials
     cur.execute("""
         CREATE TABLE IF NOT EXISTS testimonials (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -88,57 +52,13 @@ def init_db():
             created_at TEXT
         )
     """)
-
-    # ---- migrations on users: add email/password_hash/created_at if missing
-    if not _column_exists(cur, "users", "email"):
-        cur.execute("ALTER TABLE users ADD COLUMN email TEXT")
-    if not _column_exists(cur, "users", "password_hash"):
-        cur.execute("ALTER TABLE users ADD COLUMN password_hash TEXT")
-    if not _column_exists(cur, "users", "created_at"):
-        cur.execute("ALTER TABLE users ADD COLUMN created_at TEXT")
-
-    # unique email index (if exists)
-    cur.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_users_email ON users(email)")
-
     conn.commit()
     conn.close()
 
-# =========================
+# -------------------------
 # Data functions
-# =========================
-def get_user_by_email(email: str):
-    conn = get_conn()
-    cur = conn.cursor()
-    cur.execute("SELECT id, name, role, zip, skills, email, password_hash FROM users WHERE email = ?", (email,))
-    row = cur.fetchone()
-    conn.close()
-    return row
-
-def create_account(name: str, email: str, password: str, role: str, zip_code: str, skills: str = "") -> int:
-    now = datetime.utcnow().isoformat()
-    pwd_hash = _pbkdf2_hash(password)
-    conn = get_conn()
-    cur = conn.cursor()
-    cur.execute("""
-        INSERT INTO users (name, role, zip, skills, email, password_hash, created_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?)
-    """, (name.strip(), role.strip(), zip_code.strip(), skills.strip(), email.strip().lower(), pwd_hash, now))
-    conn.commit()
-    uid = cur.lastrowid
-    conn.close()
-    return uid
-
-def authenticate(email: str, password: str):
-    row = get_user_by_email(email.strip().lower())
-    if not row:
-        return None
-    uid, name, role, zip_code, skills, email_db, pwd_hash = row
-    if pwd_hash and _pbkdf2_verify(password, pwd_hash):
-        return {"id": uid, "name": name, "role": role, "zip": zip_code, "skills": skills, "email": email_db}
-    return None
-
+# -------------------------
 def get_or_create_user(name, role, zip_code, skills=""):
-    """Kept for legacy flows if needed (not used by auth)."""
     conn = get_conn()
     cur = conn.cursor()
     cur.execute("SELECT id FROM users WHERE name=? AND role=? AND zip=?", (name, role, zip_code))
@@ -146,8 +66,8 @@ def get_or_create_user(name, role, zip_code, skills=""):
     if row:
         user_id = row[0]
     else:
-        cur.execute("INSERT INTO users (name, role, zip, skills, created_at) VALUES (?,?,?,?,?)",
-                    (name, role, zip_code, skills, datetime.utcnow().isoformat()))
+        cur.execute("INSERT INTO users (name, role, zip, skills) VALUES (?,?,?,?)",
+                    (name, role, zip_code, skills))
         conn.commit()
         user_id = cur.lastrowid
     conn.close()
@@ -213,9 +133,9 @@ def get_stats():
     conn.close()
     return users, posted, accepted, completed
 
-# =========================
+# -------------------------
 # AI Task Matching
-# =========================
+# -------------------------
 def rank_tasks_by_match(tasks: List[tuple], helper_keywords: str):
     if not tasks:
         return []
@@ -229,9 +149,9 @@ def rank_tasks_by_match(tasks: List[tuple], helper_keywords: str):
     with_scores.sort(key=lambda x: x[1], reverse=True)
     return with_scores
 
-# =========================
+# -------------------------
 # UI helpers
-# =========================
+# -------------------------
 def status_badge(status: str) -> str:
     status = (status or "").strip()
     if status == "Completed":
@@ -240,9 +160,9 @@ def status_badge(status: str) -> str:
         return '<span class="pill pill-amber">Accepted</span>'
     return '<span class="pill pill-slate">Open</span>'
 
-# =========================
+# -------------------------
 # Page setup + styles
-# =========================
+# -------------------------
 st.set_page_config(page_title="NearDoer", page_icon="🧰", layout="wide")
 
 st.markdown("""
@@ -289,36 +209,59 @@ textarea, .stTextArea textarea {
 }
 .stSelectbox input{ caret-color: transparent !important; }
 
-/* Dropdown menu visibility (Role, Category, etc.) */
-div[data-baseweb="select"] div[role="listbox"] {
-  background-color: #111827 !important;
+/* ================================
+   DROPDOWN VISIBILITY FIX (FINAL v2)
+   Works for desktop + iOS/Android
+   ================================ */
+
+/* The open dropdown menu container (BaseWeb uses listbox/menu) */
+div[data-baseweb="select"] [role="listbox"],
+div[data-baseweb="menu"] {
+  background-color: #111827 !important;    /* dark menu background */
   border: 1px solid #374151 !important;
   color: #ffffff !important;
 }
-div[data-baseweb="select"] div[role="option"] {
+
+/* Each option row */
+div[data-baseweb="select"] [role="option"],
+div[data-baseweb="menu"] [role="option"] {
   background-color: #111827 !important;
-  color: #ffffff !important;
-  font-weight: 700 !important;
+  color: #ffffff !important;               /* bright text */
+  font-weight: 700 !important;             /* bolder for readability */
 }
-div[data-baseweb="select"] div[role="option"] span {
+
+/* Make inner spans/divs in options bright as well (mobile often nests labels) */
+div[data-baseweb="select"] [role="option"] * ,
+div[data-baseweb="menu"] [role="option"] * {
   color: #ffffff !important;
-  font-weight: 700 !important;
+  -webkit-text-fill-color: #ffffff !important; /* iOS Safari */
 }
-div[data-baseweb="select"] div[role="option"][aria-selected="true"] {
+
+/* Selected + hovered option styles */
+div[data-baseweb="select"] [role="option"][aria-selected="true"],
+div[data-baseweb="menu"]   [role="option"][aria-selected="true"] {
   background-color: #1f2937 !important;
-  color: #22c55e !important;
+  color: #22c55e !important;               /* green highlight for selected */
 }
-div[data-baseweb="select"] div[role="option"]:hover {
+div[data-baseweb="select"] [role="option"]:hover,
+div[data-baseweb="menu"]   [role="option"]:hover {
   background-color: #374151 !important;
   color: #ffffff !important;
 }
+
+/* The closed select input (so chosen value is readable) */
 div[data-baseweb="select"] > div {
   background-color: #0f172a !important;
   color: #f9fafb !important;
   border: 1px solid #243046 !important;
 }
 
-/* Pills */
+/* Also ensure the input text itself is bright on WebKit (mobile) */
+div[data-baseweb="select"] input {
+  color: #f9fafb !important;
+  -webkit-text-fill-color: #f9fafb !important;
+}
+
 .pill{
   display:inline-block; padding:3px 10px; font-size:12px; font-weight:700;
   border-radius:999px; letter-spacing:.2px;
@@ -348,85 +291,27 @@ div[data-baseweb="select"] > div {
 </style>
 """, unsafe_allow_html=True)
 
-# =========================
+# -------------------------
 # App
-# =========================
+# -------------------------
 init_db()
 
-# ---------- AUTH ----------
-st.sidebar.header("Account")
-if "user" not in st.session_state:
-    st.session_state["user"] = None
-
-if st.session_state["user"] is None:
-    tab_login, tab_signup = st.sidebar.tabs(["Log in", "Sign up"])
-
-    with tab_login:
-        lemail = st.text_input("Email", key="login_email")
-        lpwd = st.text_input("Password", type="password", key="login_pwd")
-        if st.button("Log in", use_container_width=True):
-            if not lemail or not lpwd:
-                st.sidebar.error("Enter email and password.")
-            else:
-                u = authenticate(lemail, lpwd)
-                if u:
-                    st.session_state["user"] = u
-                    st.sidebar.success(f"Welcome back, {u['name']}!")
-                else:
-                    st.sidebar.error("Invalid email or password.")
-
-    with tab_signup:
-        s_name = st.text_input("Full name", key="su_name")
-        s_email = st.text_input("Email", key="su_email")
-        s_pwd = st.text_input("Password", type="password", key="su_pwd")
-        s_role = st.selectbox("Role", ["Poster","Helper"], key="su_role")
-        s_zip  = st.text_input("ZIP code", key="su_zip")
-        s_skills = st.text_input("Your skills (comma-separated, helpers only)", key="su_skills")
-        if st.button("Create account", use_container_width=True):
-            if not (s_name and s_email and s_pwd and s_role and s_zip):
-                st.sidebar.error("Please fill all required fields.")
-            elif get_user_by_email(s_email.strip().lower()):
-                st.sidebar.error("An account with this email already exists.")
-            else:
-                uid = create_account(s_name, s_email, s_pwd, s_role, s_zip, s_skills if s_role=="Helper" else "")
-                # auto-login
-                st.session_state["user"] = {
-                    "id": uid, "name": s_name, "role": s_role, "zip": s_zip,
-                    "skills": s_skills if s_role=="Helper" else "", "email": s_email.strip().lower()
-                }
-                st.sidebar.success("Account created. You're logged in!")
-
-else:
-    u = st.session_state["user"]
-    st.sidebar.write(f"**Logged in as:** {u['name']}  \n**Role:** {u['role']}  \n**ZIP:** {u['zip']}")
-    if u.get("email"):
-        st.sidebar.write(f"**Email:** {u['email']}")
-    if st.sidebar.button("Log out", use_container_width=True):
-        st.session_state["user"] = None
-        st.rerun()
-
-# Require auth to proceed
-if st.session_state["user"] is None:
-    st.stop()
-
-user = st.session_state["user"]
-
-# ---------- HEADER + STATS ----------
-u_count, p_count, a_count, c_count = get_stats()
+# Stats
+u,p,a,c = get_stats()
 st.markdown(f"""
 <div class="hero">
   <h1>🧰 NearDoer — Get Small Things Done Fast</h1>
   <p>Post · AI ranks · Accept · Done</p>
 </div>
 <div style="display:flex;gap:12px;flex-wrap:wrap;margin:10px 0 18px 0;">
-  <div class="stat"><b>👤 Users</b><br><span>{u_count}</span></div>
-  <div class="stat"><b>📝 Tasks</b><br><span>{p_count}</span></div>
-  <div class="stat"><b>🤝 Accepted</b><br><span>{a_count}</span></div>
-  <div class="stat"><b>✅ Completed</b><br><span>{c_count}</span></div>
+  <div class="stat"><b>👤 Users</b><br><span>{u}</span></div>
+  <div class="stat"><b>📝 Tasks</b><br><span>{p}</span></div>
+  <div class="stat"><b>🤝 Accepted</b><br><span>{a}</span></div>
+  <div class="stat"><b>✅ Completed</b><br><span>{c}</span></div>
 </div>
 """, unsafe_allow_html=True)
 
-# ---------- TESTIMONIALS ----------
+# Testimonials
 st.markdown('<div class="section-title"><span class="section-emoji">💬</span><span>What people are saying</span></div>', unsafe_allow_html=True)
 rows = fetch_testimonials()
 if rows:
@@ -441,10 +326,26 @@ with st.expander("Leave a testimonial"):
     tq = st.text_area("Your experience")
     if st.button("Submit testimonial"):
         if tn and tq:
-            add_testimonial(tn, tr, tq)
+            add_testimonial(tn,tr,tq)
             st.success("✅ Thanks! Your testimonial is live.")
 
-# ---------- MAIN BODY ----------
+# Sidebar Profile
+st.sidebar.header("Profile")
+name = st.sidebar.text_input("Name")
+role = st.sidebar.selectbox("Role", ["Poster","Helper"])
+zip_code = st.sidebar.text_input("ZIP code")
+skills = st.sidebar.text_input("Your skills (comma-separated)") if role=="Helper" else ""
+
+if st.sidebar.button("Save / Switch Profile"):
+    if name and zip_code:
+        uid = get_or_create_user(name, role, zip_code, skills)
+        st.session_state["user"] = {"id":uid,"name":name,"role":role,"zip":zip_code,"skills":skills}
+        st.sidebar.success("Profile saved.")
+
+user = st.session_state.get("user")
+if not user:
+    st.stop()
+
 col1, col2 = st.columns([1,1])
 
 # Poster view
@@ -459,7 +360,7 @@ if user["role"] == "Poster":
             zp = st.text_input("ZIP", value=user["zip"])
             posted = st.form_submit_button("Post Task")
             if posted and t and d and zp:
-                create_task(t, d, cat, pr, zp, user["id"])
+                create_task(t,d,cat,pr,zp,user["id"])
                 st.success("Task posted!")
 
     with col2:
